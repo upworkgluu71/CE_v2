@@ -1,0 +1,8 @@
+setup.properties
+*.log
+*.pyc
+setup.properties.last
+/.project
+/.pydevproject
+/.idea
+/output/
