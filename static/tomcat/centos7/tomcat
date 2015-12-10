@@ -14,7 +14,7 @@
 #
 # Java Service Wrapper sh script.  Suitable for starting and stopping
 #  wrapped Java applications on UNIX platforms.
-#
+# for CentOS 7.1
 
 #-----------------------------------------------------------------------------
 # These settings can be modified to fit the needs of your application

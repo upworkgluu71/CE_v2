@@ -37,6 +37,10 @@ import subprocess
 import sys
 import getopt
 import hashlib
+import re
+import os
+import pwd
+import grp
 
 class Setup(object):
     def __init__(self, install_dir=None):
@@ -68,6 +72,7 @@ class Setup(object):
         }
 
         self.os_types = ['centos', 'redhat', 'fedora', 'ubuntu', 'debian']
+        self.os_initdaemon = None
         self.os_type = None
 
         self.distFolder = "/opt/dist"
@@ -81,6 +86,7 @@ class Setup(object):
         self.configFolder = '/etc/gluu/config'
         self.certFolder = '/etc/certs'
         self.tomcatHome = '/opt/tomcat'
+        self.tomcat_user_home = "/home/tomcat"
         self.tomcat_user_home_lib = "/home/tomcat/lib"
         self.oxauth_lib = "/opt/tomcat/webapps/oxauth/WEB-INF/lib"
         self.tomcatWebAppFolder = "/opt/tomcat/webapps"
@@ -146,6 +152,7 @@ class Setup(object):
         self.ldap_jmx_port = '1689'
         self.ldap_admin_port = '4444'
         self.ldapBaseFolder = '/opt/opendj'
+        self.ldapHomeFolder = '/home/ldap'
         self.ldapStartTimeOut = 30
         self.ldapSetupCommand = '%s/setup' % self.ldapBaseFolder
         self.ldapDsconfigCommand = "%s/bin/dsconfig" % self.ldapBaseFolder
@@ -163,6 +170,7 @@ class Setup(object):
                                 '%s/static/scripts/testBind.py' % self.install_dir]
         self.init_files = ['%s/static/tomcat/tomcat' % self.install_dir,
                            '%s/static/opendj/opendj' % self.install_dir]
+        self.init_files_centos7 = ['%s/static/tomcat/centos7/tomcat' % self.install_dir]
         self.redhat_services = ['memcached', 'opendj', 'tomcat', 'httpd']
         self.debian_services = ['memcached', 'opendj', 'tomcat', 'apache2']
 
@@ -198,7 +206,10 @@ class Setup(object):
         self.oxTrust_log_rotation_configuration = "%s/conf/oxTrustLogRotationConfiguration.xml" % self.tomcatHome
         self.eduperson_schema_ldif = '%s/config/schema/96-eduperson.ldif'
         self.apache2_conf = '%s/httpd.conf' % self.outputFolder
+        self.apache2_24_conf = '%s/httpd_2.4.conf' % self.outputFolder
         self.apache2_ssl_conf = '%s/https_gluu.conf' % self.outputFolder
+        self.apache2_ssl_24_conf = '%s/https_gluu_2.4.conf' % self.outputFolder
+        self.apache_version = None
         self.ldif_base = '%s/base.ldif' % self.outputFolder
         self.ldif_appliance = '%s/appliance.ldif' % self.outputFolder
         self.ldif_attributes = '%s/attributes.ldif' % self.outputFolder
@@ -240,7 +251,9 @@ class Setup(object):
                      self.ldap_setup_properties: False,
                      self.org_custom_schema: False,
                      self.apache2_conf: False,
+                     self.apache2_24_conf: False,
                      self.apache2_ssl_conf: False,
+                     self.apache2_ssl_24_conf: False,
                      self.etc_hosts: False,
                      self.etc_hostname: False,
                      self.ldif_base: False,
@@ -386,7 +399,27 @@ class Setup(object):
         return return_value
 
     def configure_httpd(self):
-        if self.os_type in ['centos', 'redhat', 'fedora']:
+        # httpd -v
+        # Server version: Apache/2.2.15 (Unix)  /etc/redhat-release  CentOS release 6.7 (Final)
+        # OR
+        # Server version: Apache/2.4.6 (CentOS) /etc/redhat-release  CentOS Linux release 7.1.1503 (Core) 
+        cmd = "httpd -v | egrep '^Server version'"
+        PIPE = subprocess.PIPE
+        p = subprocess.Popen(cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=subprocess.STDOUT, close_fds=True, cwd=None)
+        apache_version = p.stdout.read().strip().split(' ')[2].split('/')[1]
+        if re.match(r'2\.4\..*', apache_version):
+            self.apache_version = 4
+        else:
+            self.apache_version = 2
+        # CentOS 7.* + systemd + apache 2.4
+        if self.os_type == 'centos' and self.os_initdaemon == 'systemd' and self.apache_version == 4:
+            self.copyFile(self.apache2_24_conf, '/etc/httpd/conf/httpd.conf')
+            self.copyFile(self.apache2_ssl_24_conf, '/etc/httpd/conf.d/https_gluu.conf')
+        # CentOS 6.* + init + apache 2.2
+        if self.os_type == 'centos' and self.os_initdaemon == 'init':
+            self.copyFile(self.apache2_conf, '/etc/httpd/conf/httpd.conf')
+            self.copyFile(self.apache2_ssl_conf, '/etc/httpd/conf.d/https_gluu.conf')
+        if self.os_type in ['redhat', 'fedora']:
             self.copyFile(self.apache2_conf, '/etc/httpd/conf/httpd.conf')
             self.copyFile(self.apache2_ssl_conf, '/etc/httpd/conf.d/https_gluu.conf')
         if self.os_type in ['debian', 'ubuntu']:
@@ -554,7 +587,7 @@ class Setup(object):
 
     def export_opendj_public_cert(self):
         # Load password to acces OpenDJ truststore
-        self.logIt("Reding OpenDJ truststore")
+        self.logIt("Reading OpenDJ truststore")
 
         openDjPinFn = '%s/config/keystore.pin' % self.ldapBaseFolder
         openDjTruststoreFn = '%s/config/truststore' % self.ldapBaseFolder
@@ -1039,6 +1072,16 @@ class Setup(object):
             self.run([mkdir, '-p', self.configFolder])
             self.run([mkdir, '-p', self.certFolder])
             self.run([mkdir, '-p', self.outputFolder])
+            if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+                 self.run([mkdir, '-p', self.ldapHomeFolder])
+                 self.run([mkdir, '-p', self.tomcat_user_home])
+                 self.run([mkdir, '-p', '/var/www/html'])
+                 self.run([mkdir, '/var/log/httpd'])
+                 self.run([chown, '-R', 'ldap:ldap', self.ldapHomeFolder])
+                 self.run([chown, '-R', 'tomcat:tomcat', self.tomcat_user_home])
+                 self.run([chown, 'apache:apache', '/var/www'])
+                 self.run([chown, 'apache:apache', '/var/www/html'])
+                 self.run([chown, 'apache:apache', '/var/log/httpd'])
 
             if self.components['oxtrust']['enabled'] | self.components['oxauth']['enabled']:
                 self.run([mkdir, '-p', self.gluuOptFolder])
@@ -1108,8 +1151,6 @@ class Setup(object):
         else:
             installObject.hostname = installObject.getPrompt("Enter hostname")
 
-        # Get the OS type
-        installObject.os_type = installObject.detect_OS_type()
 
         # Get city and state|province code
         installObject.city = installObject.getPrompt("Enter your city or locality")
@@ -1333,16 +1374,32 @@ class Setup(object):
         except:
             self.logIt("Error running dsjavaproperties", True)
             self.logIt(traceback.format_exc(), True)
+        
+        if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+              self.run(["/opt/opendj/bin/create-rc-script", "--outputFile", "/etc/init.d/opendj", "--userName",  "ldap"])
+              self.run(["/usr/sbin/chkconfig", "--add", "opendj"])
+        else:
+              self.run(["/opt/opendj/bin/create-rc-script", "--outputFile", "/etc/init.d/opendj", "--userName",  "ldap"])
 
     def setup_init_scripts(self):
-        for init_file in self.init_files:
-            try:
-                script_name = os.path.split(init_file)[-1]
-                self.copyFile(init_file, "/etc/init.d")
-                self.run(["chmod", "755", "/etc/init.d/%s" % script_name])
-            except:
-                self.logIt("Error copying script file %s to /etc/init.d" % init_file)
-                self.logIt(traceback.format_exc(), True)
+        if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+           for init_file in self.init_files_centos7:
+               try:
+                   script_name = os.path.split(init_file)[-1]
+                   self.copyFile(init_file, "/etc/init.d")
+                   self.run(["chmod", "755", "/etc/init.d/%s" % script_name])
+               except:
+                   self.logIt("Error copying script file %s to /etc/init.d" % init_file)
+                   self.logIt(traceback.format_exc(), True)
+        else:
+           for init_file in self.init_files:
+               try:
+                   script_name = os.path.split(init_file)[-1]
+                   self.copyFile(init_file, "/etc/init.d")
+                   self.run(["chmod", "755", "/etc/init.d/%s" % script_name])
+               except:
+                   self.logIt("Error copying script file %s to /etc/init.d" % init_file)
+                   self.logIt(traceback.format_exc(), True)
         if self.os_type in ['centos', 'redhat', 'fedora']:
             for service in self.redhat_services:
                 self.run(["/sbin/chkconfig", service, "on"])
@@ -1353,19 +1410,26 @@ class Setup(object):
 
     def start_services(self):
         # Detect sevice path and apache service name
-        service_path = '/sbin/service'
-
-        apache_service_name = 'httpd'
-        if self.os_type in ['debian', 'ubuntu']:
-            service_path = '/usr/sbin/service'
-            apache_service_name = 'apache2'
-
+        if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+           service_path = '/usr/bin/systemctl'
+           apache_service_name = 'httpd'
+        elif self.os_type in ['debian', 'ubuntu']:
+           service_path = '/usr/sbin/service'
+           apache_service_name = 'apache2'
+        else:
+           service_path = '/sbin/service'
+           apache_service_name = 'httpd'
         # Apache HTTPD
-        self.run([service_path, apache_service_name, 'start'])
-
+        if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+           self.run([service_path, 'enable', apache_service_name])
+           self.run([service_path, 'start', apache_service_name])
+        else:
+           self.run([service_path, apache_service_name, 'start'])
         # Memcached
-        self.run([service_path, 'memcached', 'start'])
-
+        if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+           self.run([service_path, 'start', 'memcached.service'])
+        else:
+           self.run([service_path, 'memcached', 'start'])
         # Apache Tomcat
         try:
             # Giving LDAP a few seconds to load the data...
@@ -1375,7 +1439,11 @@ class Setup(object):
                 time.sleep(1)
                 print ".",
                 i = i + 1
-            self.run([service_path, 'tomcat', 'start'])
+            if self.os_type == 'centos' and self.os_initdaemon == 'systemd':
+               self.run(['/usr/sbin/chkconfig', '--add' ,'tomcat'])
+               self.run([service_path, 'start' ,'tomcat'])
+            else:
+               self.run([service_path, 'tomcat', 'start'])
         except:
             self.logIt("Error starting tomcat")
             self.logIt(traceback.format_exc(), True)
@@ -1384,8 +1452,10 @@ class Setup(object):
         self.logIt("Copying hosts and hostname to final destination")
 
         self.copyFile("%s/hostname" % self.outputFolder, self.etc_hostname)
-        self.run(['/bin/hostname', self.hostname])
-
+        if self.os_initdaemon == 'systemd':
+            self.run(['/usr/bin/hostnamectl', 'set-hostname', self.hostname])
+        else:
+            self.run(['/bin/hostname', self.hostname])
         self.copyFile("%s/hosts" % self.outputFolder, self.etc_hosts)
 
     def writeLdapPW(self):
@@ -1491,9 +1561,18 @@ if __name__ == '__main__':
     installObject.components['asimba']['enabled'] = setupOptions['installAsimba']
     installObject.components['cas']['enabled'] = setupOptions['installCAS']
     installObject.components['oxauth_rp']['enabled'] = setupOptions['installOxAuthRP']
+ 
+    # Get the init type   
+    installObject.os_initdaemon = open(os.path.join('/proc/1/status'), 'r').read().split()[1] 
+    # Get the OS type
+    installObject.os_type = installObject.detect_OS_type()
 
-    print "\nInstalling Gluu Server...\n\nFor more info see:\n  %s  \n  %s\n" % (installObject.log, installObject.logError)
+    print "\nInstalling Gluu Server..."
+    print "Detected OS  :  %s" % installObject.os_type
+    print "Detected init:  %s" % installObject.os_initdaemon
+    print "\n\nFor more info see:\n  %s  \n  %s\n" % (installObject.log, installObject.logError)
     print "\n** All clear text passwords contained in %s.\n" % installObject.savedProperties
+    
     try:
         os.remove(installObject.log)
         installObject.logIt('Removed %s' % installObject.log)
